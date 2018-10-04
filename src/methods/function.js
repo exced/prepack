@@ -199,15 +199,12 @@ function effectsArePure(realm: Realm, effects: Effects, F: ECMAScriptFunctionVal
 }
 
 function shouldConcreteValueBeInlined(realm: Realm, val: ConcreteValue): boolean {
-  if (val instanceof PrimitiveValue) {
-    // Primitives shoudld always be inlined
-    return true;
-  } else if (val instanceof ArrayValue) {
-    // TODO support not inlining array values
+  if (val instanceof ArrayValue) {
+    // TODO
   } else if (val instanceof FunctionValue) {
-    // TODO support not inlining function values
+    // TODO
   } else if (val instanceof ObjectValue) {
-    // TODO support not inlining object values
+    // TODO
   }
   return true;
 }
@@ -221,12 +218,16 @@ function shouldAbstractValueBeInlined(realm: Realm, val: AbstractValue): boolean
     let shouldConsequentBeInlined = true;
     let shouldAlternateBeInlined = true;
 
-    if (consequentVal instanceof ConcreteValue) {
+    if (consequentVal instanceof PrimitiveValue) {
+      shouldConsequentBeInlined = true;
+    } else if (consequentVal instanceof ConcreteValue) {
       shouldConsequentBeInlined = shouldConcreteValueBeInlined(realm, consequentVal);
     } else if (consequentVal instanceof AbstractValue) {
       shouldConsequentBeInlined = shouldAbstractValueBeInlined(realm, consequentVal);
     }
-    if (alternateVal instanceof ConcreteValue) {
+    if (alternateVal instanceof PrimitiveValue) {
+      shouldAlternateBeInlined = true;
+    } else if (alternateVal instanceof ConcreteValue) {
       shouldAlternateBeInlined = shouldConcreteValueBeInlined(realm, alternateVal);
     } else if (alternateVal instanceof AbstractValue) {
       shouldAlternateBeInlined = shouldAbstractValueBeInlined(realm, alternateVal);
@@ -240,7 +241,9 @@ function shouldAbstractValueBeInlined(realm: Realm, val: AbstractValue): boolean
 
     for (let arg of val.args) {
       let shouldArgBeInlined;
-      if (arg instanceof ConcreteValue) {
+      if (arg instanceof PrimitiveValue) {
+        shouldArgBeInlined = true;
+      } else if (arg instanceof ConcreteValue) {
         shouldArgBeInlined = shouldConcreteValueBeInlined(realm, arg);
       } else if (arg instanceof AbstractValue) {
         shouldArgBeInlined = shouldAbstractValueBeInlined(realm, arg);
@@ -310,17 +313,22 @@ function OptionallyInlineInternalCall(
   if (effectsArePure(realm, effects, F)) {
     let generator = effects.generator;
 
-    if (generator._entries.length > 3) {
-      if (result instanceof ConcreteValue && !shouldConcreteValueBeInlined(realm, result)) {
-        // TODO
-      } else if (
-        result instanceof AbstractValue &&
-        !shouldAbstractValueBeInlined(realm, result) &&
-        // For now, we do not apply this optimization if we pass arguments that contain functions
-        // otherwise we will have to materialize the function bodies, thus potentially undoing the
-        // wins of this optimization.
-        !argsContainFunctionValues(realm, argsList)
-      ) {
+    // For now, we do not apply this optimization if we pass arguments that contain functions
+    // otherwise we will have to materialize the function bodies, thus potentially undoing the
+    // wins of this optimization.
+    if (generator._entries.length > 3 && !argsContainFunctionValues(realm, argsList)) {
+      if (result instanceof PrimitiveValue) {
+        // We always inline primitive values
+      } else if (result instanceof ConcreteValue && !shouldConcreteValueBeInlined(realm, result)) {
+        let absVal = AbstractValue.createTemporalFromBuildFunction(
+          realm,
+          result.getType(),
+          [F, ...argsList],
+          createOperationDescriptor("CALL_BAILOUT", { propRef: undefined, thisArg: undefined }),
+          { isPure: true }
+        );
+        return absVal;
+      } else if (result instanceof AbstractValue && !shouldAbstractValueBeInlined(realm, result)) {
         let absVal = AbstractValue.createTemporalFromBuildFunction(
           realm,
           result.getType(),
