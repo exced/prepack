@@ -23,14 +23,13 @@ import {
   AbruptCompletion,
   Completion,
   JoinedNormalAndAbruptCompletions,
-  NormalCompletion,
   ReturnCompletion,
   SimpleNormalCompletion,
-  ThrowCompletion,
 } from "../completions.js";
 import {
   AbstractValue,
   AbstractObjectValue,
+  ArrayValue,
   BoundFunctionValue,
   ConcreteValue,
   ECMAScriptSourceFunctionValue,
@@ -78,7 +77,6 @@ import type {
 } from "@babel/types";
 import * as t from "@babel/types";
 import { PropertyDescriptor } from "../descriptors.js";
-import { NestedOptimizedFunctionSideEffect } from "../errors.js";
 import { createOperationDescriptor } from "../utils/generator.js";
 
 function InternalCall(
@@ -199,12 +197,68 @@ function effectsArePure(realm: Realm, effects: Effects, F: ECMAScriptFunctionVal
   return true;
 }
 
+function shouldConcreteValueBeInlined(realm: Realm, val: ConcreteValue): boolean {
+  if (val instanceof PrimitiveValue) {
+    // Primitives shoudld always be inlined
+    return true;
+  } else if (val instanceof ArrayValue) {
+    // TODO support not inlining array values
+  } else if (val instanceof FunctionValue) {
+    // TODO support not inlining function values
+  } else if (val instanceof ObjectValue) {
+    // TODO support not inlining object values
+  }
+  return true;
+}
+
+function shouldAbstractValueBeInlined(realm: Realm, val: AbstractValue): boolean {
+  if (val instanceof AbstractObjectValue) {
+    // TODO support not inlining object values
+    return true;
+  } else if (val.kind === "conditional") {
+    let [, consequentVal, alternateVal] = val.args;
+    let shouldConsequentBeInlined = true;
+    let shouldAlternateBeInlined = true;
+
+    if (consequentVal instanceof ConcreteValue) {
+      shouldConsequentBeInlined = shouldConcreteValueBeInlined(realm, consequentVal);
+    } else if (consequentVal instanceof AbstractValue) {
+      shouldConsequentBeInlined = shouldAbstractValueBeInlined(realm, consequentVal);
+    }
+    if (alternateVal instanceof ConcreteValue) {
+      shouldAlternateBeInlined = shouldConcreteValueBeInlined(realm, alternateVal);
+    } else if (alternateVal instanceof AbstractValue) {
+      shouldAlternateBeInlined = shouldAbstractValueBeInlined(realm, alternateVal);
+    }
+    if (!shouldConsequentBeInlined && !shouldAlternateBeInlined) {
+      return false;
+    }
+    return true;
+  } else if (val.args.length > 0) {
+    let shouldBeInlined = false;
+
+    for (let arg of val.args) {
+      let shouldArgBeInlined;
+      if (arg instanceof ConcreteValue) {
+        shouldArgBeInlined = shouldConcreteValueBeInlined(realm, arg);
+      } else if (arg instanceof AbstractValue) {
+        shouldArgBeInlined = shouldAbstractValueBeInlined(realm, arg);
+      }
+      if (shouldArgBeInlined) {
+        shouldBeInlined = true;
+        break;
+      }
+    }
+    return shouldBeInlined;
+  }
+  return false;
+}
+
 function OptionallyInlineInternalCall(
   realm: Realm,
   F: ECMAScriptFunctionValue,
   thisArgument: Value,
-  argsList: Array<Value>,
-  incorporateSavedCompletion: (realm: Realm, c: void | Completion | Value) => void | Completion | Value
+  argsList: Array<Value>
 ): Value {
   let effects = realm.evaluateForEffects(
     () => InternalCall(realm, F, thisArgument, argsList, 0),
@@ -216,21 +270,8 @@ function OptionallyInlineInternalCall(
     realm.applyEffects(effects);
     throw result;
   } else if (result instanceof JoinedNormalAndAbruptCompletions) {
-    let c = result;
-    invariant(c.containsSelectedCompletion(r => r instanceof NormalCompletion));
-    let rv = Join.joinValuesOfSelectedCompletions(r => r instanceof NormalCompletion, c);
-    if (c.containsSelectedCompletion(r => r instanceof ThrowCompletion)) {
-      // For some tests, this line makes them work. For example:
-      // - test/serializer/abstract/Throw6b it needs this line
-      // - test/serializer/abstract/Throw8 it fails with this line
-      // - test/serializer/abstract/SimpleObject2.js it fails with this line
-      // - test/serializer/abstract/PathConditions3 it needs this line
-      realm.composeWithSavedCompletion(c);
-      if (rv instanceof AbstractValue) {
-        rv = realm.simplifyAndRefineAbstractValue(rv);
-      }
-    }
-    result = rv;
+    // TODO we should support not inlining JoinedNormalAndAbruptCompletions at some point
+    return InternalCall(realm, F, thisArgument, argsList, 0);
   } else if (result instanceof SimpleNormalCompletion) {
     result = result.value;
   }
@@ -238,37 +279,31 @@ function OptionallyInlineInternalCall(
     let generator = effects.generator;
 
     if (generator._entries.length > 3) {
-      if (result instanceof PrimitiveValue) {
+      if (result instanceof ConcreteValue && !shouldConcreteValueBeInlined(realm, result)) {
         // TODO
-      } else if (result instanceof ConcreteValue) {
-        if (result instanceof ObjectValue) {
-          // TODO support not inlining object values
-          // debugger;
+      } else if (result instanceof AbstractValue && !shouldAbstractValueBeInlined(realm, result)) {
+        let giveUp = false;
+        for (let arg of argsList) {
+          if (arg instanceof ECMAScriptFunctionValue) {
+            giveUp = true;
+            break;
+          }
         }
-      } else if (result instanceof AbstractValue) {
-        if (result instanceof AbstractObjectValue) {
-          // TODO support not inlining object values
-        } else if (result.kind === "conditional") {
-          // TODO
-        } else if (result.kind === "||") {
-          // TODO
-        } else if (result.kind === "&&") {
-          // TODO
-        } else {
-          // debugger;
-          // let absVal = AbstractValue.createTemporalFromBuildFunction(
-          //   realm,
-          //   Value,
-          //   [F, ...argsList],
-          //   createOperationDescriptor("CALL_BAILOUT", { propRef: undefined, thisArg: undefined }),
-          //   { isPure: true }
-          // );
-          // return absVal;
+        if (!giveUp) {
+          let absVal = AbstractValue.createTemporalFromBuildFunction(
+            realm,
+            result.getType(),
+            [F, ...argsList],
+            createOperationDescriptor("CALL_BAILOUT", { propRef: undefined, thisArg: undefined }),
+            { isPure: true }
+          );
+          return absVal;
         }
       }
     }
   }
   realm.applyEffects(effects);
+  invariant(result instanceof Value);
   return result;
 }
 
@@ -1054,9 +1089,7 @@ export class FunctionImplementation {
     if (F instanceof NativeFunctionValue || thisArgument !== realm.intrinsics.undefined || alwaysInline) {
       return InternalCall(realm, F, thisArgument, argsList, 0);
     }
-    return OptionallyInlineInternalCall(realm, F, thisArgument, argsList, (...args) =>
-      this.incorporateSavedCompletion(...args)
-    );
+    return OptionallyInlineInternalCall(realm, F, thisArgument, argsList);
   }
 
   // ECMA262 9.2.2
