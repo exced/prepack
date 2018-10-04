@@ -78,6 +78,7 @@ import type {
 import * as t from "@babel/types";
 import { PropertyDescriptor } from "../descriptors.js";
 import { createOperationDescriptor } from "../utils/generator.js";
+import { Get } from "../methods/index.js";
 
 function InternalCall(
   realm: Realm,
@@ -254,6 +255,37 @@ function shouldAbstractValueBeInlined(realm: Realm, val: AbstractValue): boolean
   return false;
 }
 
+function containsFunctionValue(realm: Realm, arg: Value): boolean {
+  if (arg instanceof FunctionValue) {
+    return true;
+  } else if (arg instanceof AbstractValue) {
+    for (let abstractArg of arg.args) {
+      if (containsFunctionValue(realm, abstractArg)) {
+        return true;
+      }
+    }
+  } else if (arg instanceof ObjectValue) {
+    for (let [propName, binding] of arg.properties) {
+      if (binding && binding.descriptor) {
+        let val = Get(realm, arg, propName);
+        if (containsFunctionValue(realm, val)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function argsContainFunctionValues(realm: Realm, argsList: Array<Value>): boolean {
+  for (let arg of argsList) {
+    if (containsFunctionValue(realm, arg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function OptionallyInlineInternalCall(
   realm: Realm,
   F: ECMAScriptFunctionValue,
@@ -281,24 +313,22 @@ function OptionallyInlineInternalCall(
     if (generator._entries.length > 3) {
       if (result instanceof ConcreteValue && !shouldConcreteValueBeInlined(realm, result)) {
         // TODO
-      } else if (result instanceof AbstractValue && !shouldAbstractValueBeInlined(realm, result)) {
-        let giveUp = false;
-        for (let arg of argsList) {
-          if (arg instanceof ECMAScriptFunctionValue) {
-            giveUp = true;
-            break;
-          }
-        }
-        if (!giveUp) {
-          let absVal = AbstractValue.createTemporalFromBuildFunction(
-            realm,
-            result.getType(),
-            [F, ...argsList],
-            createOperationDescriptor("CALL_BAILOUT", { propRef: undefined, thisArg: undefined }),
-            { isPure: true }
-          );
-          return absVal;
-        }
+      } else if (
+        result instanceof AbstractValue &&
+        !shouldAbstractValueBeInlined(realm, result) &&
+        // For now, we do not apply this optimization if we pass arguments that contain functions
+        // otherwise we will have to materialize the function bodies, thus potentially undoing the
+        // wins of this optimization.
+        !argsContainFunctionValues(realm, argsList)
+      ) {
+        let absVal = AbstractValue.createTemporalFromBuildFunction(
+          realm,
+          result.getType(),
+          [F, ...argsList],
+          createOperationDescriptor("CALL_BAILOUT", { propRef: undefined, thisArg: undefined }),
+          { isPure: true }
+        );
+        return absVal;
       }
     }
   }
