@@ -314,6 +314,7 @@ export class Realm {
       verbose: opts.reactVerbose || false,
     };
 
+    this.optionallyInlinedDerivedObjects = new Map();
     this.reportSideEffectCallbacks = new Set();
 
     this.alreadyDescribedLocations = new WeakMap();
@@ -360,6 +361,8 @@ export class Realm {
   abstractValueImpliesCounter: number;
   impliesCounterOverflowed: boolean;
   inSimplificationPath: boolean;
+
+  optionallyInlinedDerivedObjects: Map<Value, Set<Value>>;
 
   modifiedBindings: void | Bindings;
   modifiedProperties: void | PropertyBindings;

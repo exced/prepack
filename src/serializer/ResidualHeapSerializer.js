@@ -2275,6 +2275,18 @@ export class ResidualHeapSerializer {
           let temporalAlias = value.temporalAlias;
           return !this.referencedDeclaredValues.has(temporalAlias) && !this.residualValues.has(temporalAlias);
         }
+        if (value.isIntrinsic() && this.realm.optionallyInlinedDerivedObjects.has(value)) {
+          let setOfInlinedObjectProperties = this.realm.optionallyInlinedDerivedObjects.get(value);
+
+          if (setOfInlinedObjectProperties !== undefined) {
+            for (let propVal of setOfInlinedObjectProperties) {
+              canOmit = !this.referencedDeclaredValues.has(propVal) && !this.residualValues.has(propVal);
+              if (!canOmit) {
+                return false;
+              }
+            }
+          }
+        }
         return canOmit;
       },
       declare: (value: AbstractValue | ObjectValue) => {
